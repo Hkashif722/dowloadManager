@@ -1,5 +1,4 @@
-// MARK: - Sources/DownloadManager/Configuration/DownloadManagerBuilder.swift
-
+// MARK: - Fixed DownloadManagerBuilder
 import Foundation
 
 /// Builder for creating configured download manager instances
@@ -8,7 +7,7 @@ public class DownloadManagerBuilder<Model: DownloadableModel, Storage: DownloadS
     
     private var configuration: DownloadConfiguration?
     private var storage: Storage?
-    private var strategies: [(Model.ItemType.DownloadType, any DownloadStrategy)] = []
+    private var strategyRegistrations: [(Model.ItemType.DownloadType, (DownloadManager<Model, Storage>) -> Void)] = []
     
     public init() {}
     
@@ -24,7 +23,13 @@ public class DownloadManagerBuilder<Model: DownloadableModel, Storage: DownloadS
     
     public func withStrategy<S: DownloadStrategy>(_ strategy: S, for type: Model.ItemType.DownloadType) -> Self
         where S.Item == Model.ItemType {
-        strategies.append((type, strategy))
+        
+        // Store a closure that captures both the strategy and type with their correct types
+        let registration: (DownloadManager<Model, Storage>) -> Void = { manager in
+            manager.registerStrategy(strategy, for: type)
+        }
+        
+        strategyRegistrations.append((type, registration))
         return self
     }
     
@@ -40,8 +45,9 @@ public class DownloadManagerBuilder<Model: DownloadableModel, Storage: DownloadS
         
         let manager = DownloadManager(configuration: configuration, storage: storage)
         
-        for (type, strategy) in strategies {
-            manager.registerStrategy(strategy, for: type)
+        // Register strategies using the stored closures that preserve type information
+        for (_, registration) in strategyRegistrations {
+            registration(manager)
         }
         
         return manager

@@ -34,14 +34,19 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         self.taskCoordinator = DownloadTaskCoordinator()
 
         // Initialize states and progress from storage
-        Task {
+        Task { @MainActor in
             await loadInitialStatesAndProgress()
         }
     }
     
     deinit {
         networkClient.invalidateAndCancel() // Clean up URLSession
-        Task { await taskCoordinator.cleanup() }
+        
+        // Capture taskCoordinator to avoid capturing self
+        let coordinator = taskCoordinator
+        Task.detached {
+            await coordinator.cleanup()
+        }
     }
 
     /// Loads initial states and progress from storage. Should be called during init.
@@ -165,7 +170,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         }
         
         // 0. Check if already downloading or queued via taskCoordinator or our internal queue
-        if await taskCoordinator.task(for: item.id) != nil || queueAccess.sync { itemQueue.contains(where: { $0.id == item.id }) } {
+        if await taskCoordinator.task(for: item.id) != nil || queueAccess.sync(execute: { itemQueue.contains(where: { $0.id == item.id }) }) {
             print("DownloadManager: Item \(item.id) is already downloading or queued.")
             // Optionally, update its state to queued if it was, for example, failed and retried.
             if downloadStates[item.id] == .failed {
@@ -380,7 +385,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         guard let item = try await storage.fetchItem(by: itemId) else {
             // If item not found, nothing to cancel from storage perspective
             // Still, try to cancel any active network task
-            await taskCoordinator.cancelTask(itemId) // Fire and forget if item is not in DB
+            try await taskCoordinator.cancelTask(itemId) // Fire and forget if item is not in DB
             print("DownloadManager: Item \(itemId) not found in storage, but attempted to cancel any orphaned network task.")
             await MainActor.run { // Ensure UI reflects cancellation even if item was gone
                 self.downloadStates[itemId] = .notDownloaded
@@ -532,7 +537,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
 
         // 1. Prepare download (strategy or default)
         let preparation: DownloadPreparation
-        let strategy = downloadStrategies[currentItem.downloadType.rawValue] as? any DownloadStrategy // Cast to concrete type with Item assoc.
+        let strategy = downloadStrategies[currentItem.downloadType.rawValue] // Cast to concrete type with Item assoc.
         
         // Check for resume data if item was paused
         var resumeData: Data? = nil
@@ -635,16 +640,13 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                         try await self.updateItemStateAndStorage(currentItem.id, state: .downloaded, progress: 1.0, localURL: finalURL, fileSize: fileSize)
                         print("DownloadManager: Item \(currentItem.id) successfully downloaded and processed.")
                         
-                    } catch {
+                    }catch {
                         print("DownloadManager: Error processing or moving file for item \(currentItem.id): \(error.localizedDescription)")
                         try? await self.handleDownloadError(for: currentItem.id, error: error)
-                        // Attempt to clean up temporary file if it still exists and is different from processedURL
-                        if tempURL.path != processedURL.path && FileManager.default.fileExists(atPath: tempURL.path) {
-                             try? FileManager.default.removeItem(at: tempURL)
-                        }
-                        // Also attempt to clean up processedURL if it's different from final destination (though finalURL would not be set on error)
-                        if FileManager.default.fileExists(atPath: processedURL.path) {
-                             try? FileManager.default.removeItem(at: processedURL)
+                        
+                        // Cleanup temporary file
+                        if FileManager.default.fileExists(atPath: tempURL.path) {
+                            try? FileManager.default.removeItem(at: tempURL)
                         }
                     }
                 }
