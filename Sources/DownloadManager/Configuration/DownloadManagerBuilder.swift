@@ -22,14 +22,16 @@ public class DownloadManagerBuilder<Model: DownloadableModel, Storage: DownloadS
     }
     
     public func withStrategy<S: DownloadStrategy>(_ strategy: S, for type: Model.ItemType.DownloadType) -> Self
-        where S.Item == Model.ItemType {
+    where S.Item == Model.ItemType {
         
-        // Store a closure that captures both the strategy and type with their correct types
         let registration: (DownloadManager<Model, Storage>) -> Void = { manager in
-            manager.registerStrategy(strategy, for: type)
+            Task { @MainActor in
+                manager.registerStrategy(strategy, for: type)
+            }
         }
-        
-        strategyRegistrations.append((type, registration))
+
+        strategyRegistrations.append((type, registration)) 
+
         return self
     }
     

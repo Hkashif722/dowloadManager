@@ -2,6 +2,7 @@
 import Foundation
 import Combine // For @Published
 
+@MainActor
 public final class DownloadManager<Model: DownloadableModel, Storage: DownloadStorageProtocol>
     where Storage.Model == Model, Storage.Item == Model.ItemType {
     
@@ -214,7 +215,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         try await storage.saveItem(mutableItem) // Save the potentially modified item (with parentModelId)
         
         // Update local state publishers
-        await updateLocalState(itemId: mutableItem.id, state: .queued, progress: 0.0)
+        updateLocalState(itemId: mutableItem.id, state: .queued, progress: 0.0)
 
         // 4. Add to internal queue and process
         try await downloadItemInternal(mutableItem)
@@ -378,7 +379,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
             item.localFileURL = nil // Clear previous partial file if any
         }
         try await storage.updateItem(item)
-        await updateLocalState(itemId: item.id, state: .queued, progress: item.downloadProgress)
+        updateLocalState(itemId: item.id, state: .queued, progress: item.downloadProgress)
         
         // Re-trigger downloadItemInternal which will add to queue and process
         try await downloadItemInternal(item)
@@ -480,7 +481,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         try await storage.updateItem(item) // This saves the item with cleared localFileURL and state.
         try await storage.deleteDownloadRecord(itemId: itemId) // Also ensure download record is cleared if it's separate
 
-        await updateLocalState(itemId: itemId, state: .notDownloaded, progress: 0.0)
+        updateLocalState(itemId: itemId, state: .notDownloaded, progress: 0.0)
         
         // 5. Optionally remove item from its parent model if it's no longer relevant
         if let parentId = item.parentModelId, var parentModel = try? await storage.fetchModel(by: parentId) {
@@ -558,12 +559,13 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
             }
 
             // Capture only the necessary values that are Sendable
-            let itemId = currentItem.id
+            let item = currentItem
             let itemProgress = currentItem.downloadProgress
             let taskCoordinator = self.taskCoordinator
             let storage = self.storage
             let downloadType = currentItem.downloadType
             let configuration = self.configuration
+            
 
             // 2. Create URLSessionDownloadTask via NetworkClient
             let sessionTask = await networkClient.createSessionDownloadTask(
@@ -575,11 +577,11 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                     Task { @MainActor in
                         // Update progress on main actor without capturing self
                         await MainActor.run {
-                            self.downloadProgress[itemId] = progressValue
+                            self.downloadProgress[item.id] = progressValue
                         }
                         
                         // Update storage in a separate task
-                        if var storedItem = try? await storage.fetchItem(by: itemId) {
+                        if var storedItem = try? await storage.fetchItem(by: item.id) {
                             storedItem.downloadProgress = progressValue
                             storedItem.downloadState = .downloading
                             try? await storage.updateItem(storedItem)
@@ -588,7 +590,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                 },
                 completionHandler: { tempLocalURL, error in
                     Task {
-                        await taskCoordinator.removeTask(for: itemId)
+                        await taskCoordinator.removeTask(for: item.id)
                         let activeCount = await taskCoordinator.activeTaskCount
                         
                         await MainActor.run {
@@ -603,29 +605,29 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             // Check if error is NSURLErrorCancelled and resume data might be available (for pause)
                             let nsError = error as NSError
                             if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
-                                if let resumeDataFromCoordinator = await taskCoordinator.getResumeData(for: itemId) {
-                                    print("DownloadManager: Task for \(itemId) was cancelled for pause, resumeData obtained (\(resumeDataFromCoordinator.count) bytes). State set to Paused.")
-                                    let currentProgress = await MainActor.run { self.downloadProgress[itemId] } ?? itemProgress
-                                    try? await self.updateItemStateAndStorage(itemId, state: .paused, progress: currentProgress)
+                                if let resumeDataFromCoordinator = await taskCoordinator.getResumeData(for: item.id) {
+                                    print("DownloadManager: Task for \(item.id) was cancelled for pause, resumeData obtained (\(resumeDataFromCoordinator.count) bytes). State set to Paused.")
+                                    let currentProgress = await MainActor.run { self.downloadProgress[item.id] } ?? itemProgress
+                                    try? await self.updateItemStateAndStorage(item.id, state: .paused, progress: currentProgress)
                                     return
                                 } else {
-                                    let currentState = await MainActor.run { self.downloadStates[itemId] }
+                                    let currentState = await MainActor.run { self.downloadStates[item.id] }
                                     if currentState == .cancelling {
-                                        print("DownloadManager: Task for \(itemId) was cancelled by user. State set to NotDownloaded.")
-                                        try? await self.updateItemStateAndStorage(itemId, state: .notDownloaded, progress: 0, localURL: nil, fileSize: nil)
+                                        print("DownloadManager: Task for \(item.id) was cancelled by user. State set to NotDownloaded.")
+                                        try? await self.updateItemStateAndStorage(item.id, state: .notDownloaded, progress: 0, localURL: nil, fileSize: nil)
                                         return
                                     }
                                 }
                             }
                             // Genuine error
-                            print("DownloadManager: Download failed for item \(itemId) with error: \(error.localizedDescription)")
-                            try? await self.handleDownloadError(for: itemId, error: error)
+                            print("DownloadManager: Download failed for item \(item.id) with error: \(error.localizedDescription)")
+                            try? await self.handleDownloadError(for: item.id, error: error)
                             return
                         }
                         
                         guard let tempURL = tempLocalURL else {
-                            print("DownloadManager: Download completed for item \(itemId) but temporary URL is missing.")
-                            try? await self.handleDownloadError(for: itemId, error: DownloadError.downloadFailed("Temporary file URL missing after download."))
+                            print("DownloadManager: Download completed for item \(item.id) but temporary URL is missing.")
+                            try? await self.handleDownloadError(for: item.id, error: DownloadError.downloadFailed("Temporary file URL missing after download."))
                             return
                         }
                         
@@ -639,26 +641,27 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             let fileSize = attributes?[.size] as? Int64
 
                             // Re-fetch strategy from self to ensure we have the latest
-                            let currentStrategy = self.downloadStrategies[downloadType.rawValue]
-                            if let concreteStrategy = currentStrategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(currentItem) {
-                                processedURL = try await concreteStrategy.processDownloadedFile(at: tempURL, for: currentItem)
+                            let currentStrategy = await self.downloadStrategies[downloadType.rawValue]
+                            
+                            if let concreteStrategy = currentStrategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(item) {
+                                processedURL = try await concreteStrategy.processDownloadedFile(at: tempURL, for: item)
                                 // Validate after processing if strategy requires it
-                                let isValid = try await concreteStrategy.validateDownload(at: processedURL, for: currentItem)
+                                let isValid = try await concreteStrategy.validateDownload(at: processedURL, for: item)
                                 if !isValid {
                                     throw DownloadError.strategyError("Download validation failed by custom strategy.")
                                 }
                             }
                             
-                            finalURL = try self.moveFileToPermanentLocation(processedURL, for: currentItem)
-                            print("DownloadManager: File for item \(itemId) moved to \(finalURL.path)")
+                            finalURL = try await self.moveFileToPermanentLocation(processedURL, for: item)
+                            print("DownloadManager: File for item \(item.id) moved to \(finalURL.path)")
                             
                             // 4. Update item state to .downloaded and save final state
-                            try await self.updateItemStateAndStorage(itemId, state: .downloaded, progress: 1.0, localURL: finalURL, fileSize: fileSize)
-                            print("DownloadManager: Item \(itemId) successfully downloaded and processed.")
+                            try await self.updateItemStateAndStorage(item.id, state: .downloaded, progress: 1.0, localURL: finalURL, fileSize: fileSize)
+                            print("DownloadManager: Item \(item.id) successfully downloaded and processed.")
                             
                         } catch {
-                            print("DownloadManager: Error processing or moving file for item \(itemId): \(error.localizedDescription)")
-                            try? await self.handleDownloadError(for: itemId, error: error)
+                            print("DownloadManager: Error processing or moving file for item \(item.id): \(error.localizedDescription)")
+                            try? await self.handleDownloadError(for: item.id, error: error)
                             
                             // Cleanup temporary file
                             if FileManager.default.fileExists(atPath: tempURL.path) {
@@ -731,7 +734,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         try await storage.updateItem(itemToUpdate)
         
         // Update local @Published properties on the main actor
-        await updateLocalState(itemId: itemId, state: state, progress: itemToUpdate.downloadProgress)
+        updateLocalState(itemId: itemId, state: state, progress: itemToUpdate.downloadProgress)
     }
     
     // Helper to update @Published properties on the main actor

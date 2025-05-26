@@ -9,7 +9,7 @@
 // MARK: - Download Storage Protocol
 import Foundation
 
-public protocol DownloadStorageProtocol {
+public protocol DownloadStorageProtocol: Sendable {
     associatedtype Model: DownloadableModel
     associatedtype Item: DownloadableItem where Item.DownloadType == Model.ItemType.DownloadType // Ensure consistency
     
