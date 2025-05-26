@@ -2,7 +2,7 @@
 import Foundation
 
 /// Represents a container model (e.g., Course) that contains downloadable items
-public protocol DownloadableModel: AnyObject, Identifiable, Codable {
+public protocol DownloadableModel: AnyObject, Identifiable, Codable, Sendable {
     associatedtype ItemType: DownloadableItem
     
     var id: UUID { get }

@@ -14,8 +14,9 @@ public struct DownloadPreparation: Sendable {
         self.additionalParameters = additionalParameters
     }
 }
+
 /// Allows custom download preparation logic for specific types
-public protocol DownloadStrategy {
+public protocol DownloadStrategy: Sendable {
     associatedtype Item: DownloadableItem
     
     /// Prepares the download, potentially modifying the URL or adding headers.

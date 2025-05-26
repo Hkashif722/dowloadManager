@@ -34,39 +34,42 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
         self.taskCoordinator = DownloadTaskCoordinator()
 
         // Initialize states and progress from storage
-        Task { @MainActor in
-            await loadInitialStatesAndProgress()
-        }
+        
+        self.loadInitialStatesAndProgress()
+
     }
     
     deinit {
-        networkClient.invalidateAndCancel() // Clean up URLSession
-        
         // Capture taskCoordinator to avoid capturing self
         let coordinator = taskCoordinator
+        let networkClient = networkClient
         Task.detached {
             await coordinator.cleanup()
+            await networkClient.invalidateAndCancel()
         }
     }
 
     /// Loads initial states and progress from storage. Should be called during init.
-    internal func loadInitialStatesAndProgress() async {
-        do {
-            let items = try await storage.fetchAllModels().flatMap { $0.items }
-            var initialStates: [UUID: DownloadState] = [:]
-            var initialProgress: [UUID: Double] = [:]
-            for item in items {
-                initialStates[item.id] = item.downloadState
-                initialProgress[item.id] = item.downloadProgress
+    /// Loads initial states and progress from storage. Should be called during init.
+        internal func loadInitialStatesAndProgress()  {
+            Task { [weak self] in
+                guard let self = self else { return }
+                
+                do {
+                    let items = try await storage.fetchAllModels().flatMap { $0.items }
+                    var initialStates: [UUID: DownloadState] = [:]
+                    var initialProgress: [UUID: Double] = [:]
+                    for item in items {
+                        initialStates[item.id] = item.downloadState
+                        initialProgress[item.id] = item.downloadProgress
+                    }
+                    self.downloadStates = initialStates
+                    self.downloadProgress = initialProgress
+                } catch {
+                    print("DownloadManager: Failed to load initial states from storage: \(error)")
+                }
             }
-            await MainActor.run {
-                self.downloadStates = initialStates
-                self.downloadProgress = initialProgress
-            }
-        } catch {
-            print("DownloadManager: Failed to load initial states from storage: \(error)")
         }
-    }
     
     /// Resumes any downloads that were in 'downloading' or 'queued' state.
     public func initializePendingTasksFromStorage() async {
@@ -533,131 +536,144 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
     // MARK: - Private Methods
     
     private func startDownload(item: Item) async throws {
-        var currentItem = item // Make mutable copy to update progress/state during download
+            var currentItem = item // Make mutable copy to update progress/state during download
 
-        // 1. Prepare download (strategy or default)
-        let preparation: DownloadPreparation
-        let strategy = downloadStrategies[currentItem.downloadType.rawValue] // Cast to concrete type with Item assoc.
-        
-        // Check for resume data if item was paused
-        var resumeData: Data? = nil
-        if currentItem.downloadState == .paused || currentItem.downloadProgress > 0 && currentItem.downloadProgress < 1.0 { // Also consider resuming if partially downloaded
-            resumeData = await taskCoordinator.getResumeData(for: currentItem.id)
-            if resumeData != nil {
-                print("DownloadManager: Found resume data for item \(currentItem.id). Attempting to resume.")
-            }
-        }
-
-        if let concreteStrategy = strategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(currentItem) {
-             preparation = try await concreteStrategy.prepareDownload(for: currentItem, resumeData: resumeData)
-        } else {
-            preparation = DownloadPreparation(url: currentItem.downloadURL, resumeData: resumeData)
-        }
-
-        // 2. Create URLSessionDownloadTask via NetworkClient
-        let sessionTask = networkClient.createSessionDownloadTask(
-            url: preparation.url,
-            headers: preparation.headers,
-            resumeData: preparation.resumeData, // Use resumeData from preparation
-            itemId: currentItem.id,
-            progressHandler: { [weak self] progressValue in
-                Task { @MainActor [weak self] in // Ensure updates on main actor
-                    guard let self = self else { return }
-                    // Update item in memory (if we keep a mutable copy)
-                    // currentItem.downloadProgress = progressValue // Careful with actor context here
-                    
-                    // Update publishers
-                    self.downloadProgress[currentItem.id] = progressValue
-                    
-                    // Update storage (throttled or on significant change if needed)
-                    // For now, update on each progress step. Consider performance for many small updates.
-                    if var storedItem = try? await self.storage.fetchItem(by: currentItem.id) {
-                        storedItem.downloadProgress = progressValue
-                        storedItem.downloadState = .downloading // ensure state is downloading
-                        try? await self.storage.updateItem(storedItem)
-                    }
-                }
-            },
-            completionHandler: { [weak self] tempLocalURL, error in
-                Task { [weak self] in // Ensure completion handling is on its own task
-                    guard let self = self else { return }
-                    
-                    await self.taskCoordinator.removeTask(for: currentItem.id) // Task completed or failed
-                    self.activeDownloadsCount = await self.taskCoordinator.activeTaskCount
-                    
-                    defer {
-                        Task { await self.processQueue() } // Try to process next item regardless of outcome
-                    }
-
-                    if let error = error {
-                        // Check if error is NSURLErrorCancelled and resume data might be available (for pause)
-                        let nsError = error as NSError
-                        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
-                            if let resumeDataFromCoordinator = await self.taskCoordinator.getResumeData(for: currentItem.id) {
-                                print("DownloadManager: Task for \(currentItem.id) was cancelled for pause, resumeData obtained (\(resumeDataFromCoordinator.count) bytes). State set to Paused.")
-                                try? await self.updateItemStateAndStorage(currentItem.id, state: .paused, progress: self.downloadProgress[currentItem.id] ?? currentItem.downloadProgress) // Keep current progress
-                                return // Do not mark as failed if it's a pause
-                            } else if self.downloadStates[currentItem.id] == .cancelling {
-                                print("DownloadManager: Task for \(currentItem.id) was cancelled by user. State set to NotDownloaded.")
-                                try? await self.updateItemStateAndStorage(currentItem.id, state: .notDownloaded, progress: 0, localURL: nil, fileSize: nil)
-                                return
-                            }
-                        }
-                        // Genuine error
-                        print("DownloadManager: Download failed for item \(currentItem.id) with error: \(error.localizedDescription)")
-                        try? await self.handleDownloadError(for: currentItem.id, error: error)
-                        return
-                    }
-                    
-                    guard let tempURL = tempLocalURL else {
-                        print("DownloadManager: Download completed for item \(currentItem.id) but temporary URL is missing.")
-                        try? await self.handleDownloadError(for: currentItem.id, error: DownloadError.downloadFailed("Temporary file URL missing after download."))
-                        return
-                    }
-                    
-                    // 3. Process and move file (strategy or default)
-                    do {
-                        let finalURL: URL
-                        var processedURL = tempURL
-                        
-                        // Fetch file size from tempURL attributes before any processing
-                        let attributes = try? FileManager.default.attributesOfItem(atPath: tempURL.path)
-                        let fileSize = attributes?[.size] as? Int64
-
-                        if let concreteStrategy = strategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(currentItem) {
-                            processedURL = try await concreteStrategy.processDownloadedFile(at: tempURL, for: currentItem)
-                            // Validate after processing if strategy requires it
-                            let isValid = try await concreteStrategy.validateDownload(at: processedURL, for: currentItem)
-                            if !isValid {
-                                throw DownloadError.strategyError("Download validation failed by custom strategy.")
-                            }
-                        }
-                        
-                        finalURL = try self.moveFileToPermanentLocation(processedURL, for: currentItem)
-                        print("DownloadManager: File for item \(currentItem.id) moved to \(finalURL.path)")
-                        
-                        // 4. Update item state to .downloaded and save final state
-                        try await self.updateItemStateAndStorage(currentItem.id, state: .downloaded, progress: 1.0, localURL: finalURL, fileSize: fileSize)
-                        print("DownloadManager: Item \(currentItem.id) successfully downloaded and processed.")
-                        
-                    }catch {
-                        print("DownloadManager: Error processing or moving file for item \(currentItem.id): \(error.localizedDescription)")
-                        try? await self.handleDownloadError(for: currentItem.id, error: error)
-                        
-                        // Cleanup temporary file
-                        if FileManager.default.fileExists(atPath: tempURL.path) {
-                            try? FileManager.default.removeItem(at: tempURL)
-                        }
-                    }
+            // 1. Prepare download (strategy or default)
+            let preparation: DownloadPreparation
+            let strategy = downloadStrategies[currentItem.downloadType.rawValue] // Cast to concrete type with Item assoc.
+            
+            // Check for resume data if item was paused
+            var resumeData: Data? = nil
+            if currentItem.downloadState == .paused || currentItem.downloadProgress > 0 && currentItem.downloadProgress < 1.0 { // Also consider resuming if partially downloaded
+                resumeData = await taskCoordinator.getResumeData(for: currentItem.id)
+                if resumeData != nil {
+                    print("DownloadManager: Found resume data for item \(currentItem.id). Attempting to resume.")
                 }
             }
-        )
 
-        // 3. Add to TaskCoordinator
-        await taskCoordinator.addTask(sessionTask, for: currentItem.id)
-        // taskCoordinator starts the task upon adding.
-    }
+            if let concreteStrategy = strategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(currentItem) {
+                 preparation = try await concreteStrategy.prepareDownload(for: currentItem, resumeData: resumeData)
+            } else {
+                preparation = DownloadPreparation(url: currentItem.downloadURL, resumeData: resumeData)
+            }
 
+            // Capture only the necessary values that are Sendable
+            let itemId = currentItem.id
+            let itemProgress = currentItem.downloadProgress
+            let taskCoordinator = self.taskCoordinator
+            let storage = self.storage
+            let downloadType = currentItem.downloadType
+            let configuration = self.configuration
+
+            // 2. Create URLSessionDownloadTask via NetworkClient
+            let sessionTask = await networkClient.createSessionDownloadTask(
+                url: preparation.url,
+                headers: preparation.headers,
+                resumeData: preparation.resumeData, // Use resumeData from preparation
+                itemId: currentItem.id,
+                progressHandler: { progressValue in
+                    Task { @MainActor in
+                        // Update progress on main actor without capturing self
+                        await MainActor.run {
+                            self.downloadProgress[itemId] = progressValue
+                        }
+                        
+                        // Update storage in a separate task
+                        if var storedItem = try? await storage.fetchItem(by: itemId) {
+                            storedItem.downloadProgress = progressValue
+                            storedItem.downloadState = .downloading
+                            try? await storage.updateItem(storedItem)
+                        }
+                    }
+                },
+                completionHandler: { tempLocalURL, error in
+                    Task {
+                        await taskCoordinator.removeTask(for: itemId)
+                        let activeCount = await taskCoordinator.activeTaskCount
+                        
+                        await MainActor.run {
+                            self.activeDownloadsCount = activeCount
+                        }
+                        
+                        defer {
+                            Task { await self.processQueue() }
+                        }
+
+                        if let error = error {
+                            // Check if error is NSURLErrorCancelled and resume data might be available (for pause)
+                            let nsError = error as NSError
+                            if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+                                if let resumeDataFromCoordinator = await taskCoordinator.getResumeData(for: itemId) {
+                                    print("DownloadManager: Task for \(itemId) was cancelled for pause, resumeData obtained (\(resumeDataFromCoordinator.count) bytes). State set to Paused.")
+                                    let currentProgress = await MainActor.run { self.downloadProgress[itemId] } ?? itemProgress
+                                    try? await self.updateItemStateAndStorage(itemId, state: .paused, progress: currentProgress)
+                                    return
+                                } else {
+                                    let currentState = await MainActor.run { self.downloadStates[itemId] }
+                                    if currentState == .cancelling {
+                                        print("DownloadManager: Task for \(itemId) was cancelled by user. State set to NotDownloaded.")
+                                        try? await self.updateItemStateAndStorage(itemId, state: .notDownloaded, progress: 0, localURL: nil, fileSize: nil)
+                                        return
+                                    }
+                                }
+                            }
+                            // Genuine error
+                            print("DownloadManager: Download failed for item \(itemId) with error: \(error.localizedDescription)")
+                            try? await self.handleDownloadError(for: itemId, error: error)
+                            return
+                        }
+                        
+                        guard let tempURL = tempLocalURL else {
+                            print("DownloadManager: Download completed for item \(itemId) but temporary URL is missing.")
+                            try? await self.handleDownloadError(for: itemId, error: DownloadError.downloadFailed("Temporary file URL missing after download."))
+                            return
+                        }
+                        
+                        // 3. Process and move file (strategy or default)
+                        do {
+                            let finalURL: URL
+                            var processedURL = tempURL
+                            
+                            // Fetch file size from tempURL attributes before any processing
+                            let attributes = try? FileManager.default.attributesOfItem(atPath: tempURL.path)
+                            let fileSize = attributes?[.size] as? Int64
+
+                            // Re-fetch strategy from self to ensure we have the latest
+                            let currentStrategy = self.downloadStrategies[downloadType.rawValue]
+                            if let concreteStrategy = currentStrategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(currentItem) {
+                                processedURL = try await concreteStrategy.processDownloadedFile(at: tempURL, for: currentItem)
+                                // Validate after processing if strategy requires it
+                                let isValid = try await concreteStrategy.validateDownload(at: processedURL, for: currentItem)
+                                if !isValid {
+                                    throw DownloadError.strategyError("Download validation failed by custom strategy.")
+                                }
+                            }
+                            
+                            finalURL = try self.moveFileToPermanentLocation(processedURL, for: currentItem)
+                            print("DownloadManager: File for item \(itemId) moved to \(finalURL.path)")
+                            
+                            // 4. Update item state to .downloaded and save final state
+                            try await self.updateItemStateAndStorage(itemId, state: .downloaded, progress: 1.0, localURL: finalURL, fileSize: fileSize)
+                            print("DownloadManager: Item \(itemId) successfully downloaded and processed.")
+                            
+                        } catch {
+                            print("DownloadManager: Error processing or moving file for item \(itemId): \(error.localizedDescription)")
+                            try? await self.handleDownloadError(for: itemId, error: error)
+                            
+                            // Cleanup temporary file
+                            if FileManager.default.fileExists(atPath: tempURL.path) {
+                                try? FileManager.default.removeItem(at: tempURL)
+                            }
+                        }
+                    }
+                }
+            )
+
+            // 3. Add to TaskCoordinator
+            await taskCoordinator.addTask(sessionTask, for: currentItem.id)
+            // taskCoordinator starts the task upon adding.
+        }
+    
     private func moveFileToPermanentLocation(_ sourceURL: URL, for item: Item) throws -> URL {
         let fileManager = FileManager.default
         
@@ -727,13 +743,13 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
 
     // Helper to deal with type erasure of DownloadStrategy's associated type `Item`
     // This is a common pattern for working with protocols with associated types in heterogeneous collections.
-    private struct DownloadStrategyHelper<SpecificItem: DownloadableItem>: DownloadStrategy {
+     private struct DownloadStrategyHelper<SpecificItem: DownloadableItem>: DownloadStrategy {
         typealias Item = SpecificItem
         
-        private let _prepareDownload: (Item, Data?) async throws -> DownloadPreparation
-        private let _processDownloadedFile: (URL, Item) async throws -> URL
-        private let _validateDownload: (URL, Item) async throws -> Bool
-        private let _itemTypeMatches: (any DownloadableItem) -> Bool
+        private let _prepareDownload: @Sendable  (Item, Data?) async throws -> DownloadPreparation
+        private let _processDownloadedFile: @Sendable (URL, Item) async throws -> URL
+        private let _validateDownload: @Sendable  (URL, Item) async throws -> Bool
+        private let _itemTypeMatches: @Sendable (any DownloadableItem) -> Bool
 
         init<S: DownloadStrategy>(_ strategy: S) where S.Item == Item {
             _prepareDownload = strategy.prepareDownload
