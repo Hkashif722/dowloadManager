@@ -1,20 +1,19 @@
 // MARK: - Download Strategy Protocol
 import Foundation
 
-public struct DownloadPreparation {
+public struct DownloadPreparation: Sendable {
     public let url: URL
     public let headers: [String: String]?
-    public let resumeData: Data? // Added for resuming downloads
-    public let additionalData: [String: Any]? // For any other non-standard data
+    public let resumeData: Data?
+    public let additionalParameters: [String: String]?
     
-    public init(url: URL, headers: [String: String]? = nil, resumeData: Data? = nil, additionalData: [String: Any]? = nil) {
+    public init(url: URL, headers: [String: String]? = nil, resumeData: Data? = nil, additionalParameters: [String: String]? = nil) {
         self.url = url
         self.headers = headers
         self.resumeData = resumeData
-        self.additionalData = additionalData
+        self.additionalParameters = additionalParameters
     }
 }
-
 /// Allows custom download preparation logic for specific types
 public protocol DownloadStrategy {
     associatedtype Item: DownloadableItem

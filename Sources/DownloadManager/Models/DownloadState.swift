@@ -1,7 +1,8 @@
 // MARK: - Download State
 import Foundation
 
-public enum DownloadState: String, Codable, Equatable {
+// MARK: - Fixed Download State (Sendable)
+public enum DownloadState: String, Codable, Equatable, Sendable {
     case notDownloaded
     case queued
     case downloading

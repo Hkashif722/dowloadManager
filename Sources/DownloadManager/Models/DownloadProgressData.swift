@@ -1,7 +1,8 @@
 // MARK: - Download Progress
 import Foundation
 
-public struct DownloadProgressData: Codable, Equatable {
+// MARK: - Fixed Download Progress Data (Sendable)
+public struct DownloadProgressData: Codable, Equatable, Sendable {
     public let itemId: UUID
     public let bytesWritten: Int64
     public let totalBytesExpected: Int64
@@ -19,5 +20,3 @@ public struct DownloadProgressData: Codable, Equatable {
         self.totalBytesExpected = totalBytesExpected
     }
 }
-// If using this, DownloadManager's @Published var would be [UUID: DownloadProgressData]
-// and DownloadableItem.downloadProgress would store the fractionCompleted (Double).

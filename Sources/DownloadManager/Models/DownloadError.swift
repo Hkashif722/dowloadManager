@@ -1,7 +1,8 @@
 // MARK: - Download Error
 import Foundation
 
-public enum DownloadError: LocalizedError, Equatable {
+// MARK: - Fixed Download Error (Sendable)
+public enum DownloadError: LocalizedError, Equatable, Sendable {
     case unsupportedType(String)
     case itemNotFound
     case modelNotFound
@@ -57,17 +58,17 @@ public enum DownloadError: LocalizedError, Equatable {
         }
     }
     
-    // Equatable conformance
+    // Equatable conformance for Sendable Error types
     public static func == (lhs: DownloadError, rhs: DownloadError) -> Bool {
         switch (lhs, rhs) {
         case (.unsupportedType(let l), .unsupportedType(let r)): return l == r
         case (.itemNotFound, .itemNotFound): return true
         case (.modelNotFound, .modelNotFound): return true
-        case (.networkError(let l), .networkError(let r)): return l.localizedDescription == r.localizedDescription // Basic check
-        case (.storageError(let l), .storageError(let r)): return l.localizedDescription == r.localizedDescription // Basic check
+        case (.networkError(let l), .networkError(let r)): return l.localizedDescription == r.localizedDescription
+        case (.storageError(let l), .storageError(let r)): return l.localizedDescription == r.localizedDescription
         case (.missingConfiguration, .missingConfiguration): return true
         case (.missingStorage, .missingStorage): return true
-        case (.fileOperationFailed(let lReason, _), .fileOperationFailed(let rReason, _)): return lReason == rReason // Simplified
+        case (.fileOperationFailed(let lReason, _), .fileOperationFailed(let rReason, _)): return lReason == rReason
         case (.downloadFailed(let l), .downloadFailed(let r)): return l == r
         case (.unknownNetworkError, .unknownNetworkError): return true
         case (.taskAlreadyExists(let l), .taskAlreadyExists(let r)): return l == r

@@ -2,8 +2,8 @@
 
 import Foundation
 
-/// Configuration for the download manager
-public struct DownloadConfiguration {
+// MARK: - Fixed Download Configuration (Sendable)
+public struct DownloadConfiguration: Sendable {
     public let downloadsDirectory: URL
     public let maxConcurrentDownloads: Int
     public let allowsCellularAccess: Bool
@@ -11,6 +11,7 @@ public struct DownloadConfiguration {
     public let sessionIdentifier: String
     public let retryLimit: Int
     public let retryDelay: TimeInterval
+    public let networkConfiguration: NetworkConfiguration
     
     public init(
         downloadsDirectory: URL? = nil,
@@ -30,5 +31,27 @@ public struct DownloadConfiguration {
         self.sessionIdentifier = sessionIdentifier
         self.retryLimit = retryLimit
         self.retryDelay = retryDelay
+        self.networkConfiguration = NetworkConfiguration(
+            sessionIdentifier: sessionIdentifier,
+            allowsCellularAccess: allowsCellularAccess,
+            isDiscretionary: isDiscretionary
+        )
+    }
+}
+
+// MARK: - Network Configuration (Sendable)
+public struct NetworkConfiguration: Sendable {
+    public let sessionIdentifier: String?
+    public let allowsCellularAccess: Bool
+    public let isDiscretionary: Bool
+    
+    public init(
+        sessionIdentifier: String? = nil,
+        allowsCellularAccess: Bool = true,
+        isDiscretionary: Bool = false
+    ) {
+        self.sessionIdentifier = sessionIdentifier
+        self.allowsCellularAccess = allowsCellularAccess
+        self.isDiscretionary = isDiscretionary
     }
 }
