@@ -30,7 +30,7 @@ public class DownloadManagerBuilder<Model: DownloadableModel, Storage: DownloadS
             }
         }
 
-        strategyRegistrations.append((type, registration)) 
+        strategyRegistrations.append((type, registration))
 
         return self
     }

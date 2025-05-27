@@ -51,7 +51,6 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
     }
 
     /// Loads initial states and progress from storage. Should be called during init.
-    /// Loads initial states and progress from storage. Should be called during init.
         internal func loadInitialStatesAndProgress()  {
             Task { [weak self] in
                 guard let self = self else { return }
@@ -680,22 +679,40 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
     private func moveFileToPermanentLocation(_ sourceURL: URL, for item: Item) throws -> URL {
         let fileManager = FileManager.default
         
+        // 1. Create and verify the destination directory
         let destinationDir = configuration.downloadsDirectory
             .appendingPathComponent(item.downloadType.rawValue, isDirectory: true)
             .appendingPathComponent(item.parentModelId?.uuidString ?? "orphaned_items", isDirectory: true)
         
-        try fileManager.safeCreateDirectory(at: destinationDir)
+        // Add debug logging
+        print("DownloadManager: Attempting to create directory at \(destinationDir.path)")
         
-        // Use a unique filename, e.g., item ID + original extension or strategy-defined extension
-        // Ensure item.downloadType.fileExtension is robust.
+        // Ensure directory exists with intermediate directories
+        try fileManager.createDirectory(at: destinationDir, withIntermediateDirectories: true, attributes: nil)
+        
+        // 2. Verify source file exists
+        if !fileManager.fileExists(atPath: sourceURL.path) {
+            throw DownloadError.downloadFailed("Source file does not exist: \(sourceURL.path)")
+        }
+        
+        // 3. Create destination file path with proper extension
         let fileExtension = item.downloadType.fileExtension.isEmpty ? sourceURL.pathExtension : item.downloadType.fileExtension
         let fileName = "\(item.id.uuidString).\(fileExtension)"
         let finalURL = destinationDir.appendingPathComponent(fileName)
         
-        try fileManager.secureMoveItem(at: sourceURL, to: finalURL)
+        // 4. Debug logging
+        print("DownloadManager: Moving file from \(sourceURL.path) to \(finalURL.path)")
+        
+        // 5. Handle if destination already exists
+        if fileManager.fileExists(atPath: finalURL.path) {
+            try fileManager.removeItem(at: finalURL)
+        }
+        
+        // 6. Use standard moveItem instead of custom secureMoveItem
+        try fileManager.moveItem(at: sourceURL, to: finalURL)
         return finalURL
     }
-
+    
     private func handleDownloadError(for itemId: UUID, error: Error) async throws {
         let currentProgress = await MainActor.run { self.downloadProgress[itemId] } ?? 0.0
         // Preserve localFileURL if error is recoverable or for resume, otherwise clear it.
@@ -745,7 +762,6 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
     }
 
     // Helper to deal with type erasure of DownloadStrategy's associated type `Item`
-    // This is a common pattern for working with protocols with associated types in heterogeneous collections.
      private struct DownloadStrategyHelper<SpecificItem: DownloadableItem>: DownloadStrategy {
         typealias Item = SpecificItem
         
