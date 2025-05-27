@@ -588,34 +588,6 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                     }
                 },
                 completionHandler: { tempLocalURL, error in
-                    // CRITICAL: Handle temporary file SYNCHRONOUSLY first
-                    var securedTempURL: URL?
-                    var tempFileError: Error?
-                    var tempFileSize: Int64?
-                    
-                    // Synchronously secure the temporary file before completion handler returns
-                    if let tempURL = tempLocalURL, error == nil {
-                        do {
-                            // Get file size from temp file before moving it
-                            let attributes = try FileManager.default.attributesOfItem(atPath: tempURL.path)
-                            tempFileSize = attributes[.size] as? Int64
-                            
-                            // Create a secure temporary directory for our file
-                            let tempDirectory = FileManager.default.temporaryDirectory
-                            let secureFileName = "download_\(item.id)_\(UUID().uuidString)"
-                            let secureURL = tempDirectory.appendingPathComponent(secureFileName)
-                            
-                            // Move the file synchronously to our secure location
-                            try FileManager.default.moveItem(at: tempURL, to: secureURL)
-                            securedTempURL = secureURL
-                            print("DownloadManager: Temporary file secured at \(secureURL.path)")
-                        } catch {
-                            tempFileError = error
-                            print("DownloadManager: Failed to secure temporary file: \(error.localizedDescription)")
-                        }
-                    }
-                    
-                    // Now proceed with async operations using the secured file
                     Task {
                         await taskCoordinator.removeTask(for: item.id)
                         let activeCount = await taskCoordinator.activeTaskCount
@@ -627,8 +599,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                         defer {
                             Task { await self.processQueue() }
                         }
-                        
-                        // Handle original download error
+
                         if let error = error {
                             // Check if error is NSURLErrorCancelled and resume data might be available (for pause)
                             let nsError = error as NSError
@@ -653,32 +624,26 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             return
                         }
                         
-                        // Handle temp file securing error
-                        if let tempFileError = tempFileError {
-                            print("DownloadManager: Failed to secure temporary file for item \(item.id): \(tempFileError.localizedDescription)")
-                            try? await self.handleDownloadError(for: item.id, error: DownloadError.downloadFailed("Failed to secure temporary file: \(tempFileError.localizedDescription)"))
-                            return
-                        }
-                        
-                        guard let secureURL = securedTempURL else {
-                            print("DownloadManager: Download completed for item \(item.id) but failed to secure temporary file.")
-                            try? await self.handleDownloadError(for: item.id, error: DownloadError.downloadFailed("Failed to secure temporary file after download."))
+                        guard let tempURL = tempLocalURL else {
+                            print("DownloadManager: Download completed for item \(item.id) but temporary URL is missing.")
+                            try? await self.handleDownloadError(for: item.id, error: DownloadError.downloadFailed("Temporary file URL missing after download."))
                             return
                         }
                         
                         // 3. Process and move file (strategy or default)
                         do {
                             let finalURL: URL
-                            var processedURL = secureURL
+                            var processedURL = tempURL
                             
-                            // Use the file size we captured synchronously
-                            let fileSize = tempFileSize
-                            
+                            // Fetch file size from tempURL attributes before any processing
+                            let attributes = try? FileManager.default.attributesOfItem(atPath: tempURL.path)
+                            let fileSize = attributes?[.size] as? Int64
+
                             // Re-fetch strategy from self to ensure we have the latest
                             let currentStrategy = await self.downloadStrategies[downloadType.rawValue]
                             
                             if let concreteStrategy = currentStrategy as? DownloadStrategyHelper<Item>, concreteStrategy.itemTypeMatches(item) {
-                                processedURL = try await concreteStrategy.processDownloadedFile(at: secureURL, for: item)
+                                processedURL = try await concreteStrategy.processDownloadedFile(at: tempURL, for: item)
                                 // Validate after processing if strategy requires it
                                 let isValid = try await concreteStrategy.validateDownload(at: processedURL, for: item)
                                 if !isValid {
@@ -696,20 +661,20 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                         } catch {
                             print("DownloadManager: Error processing or moving file for item \(item.id): \(error.localizedDescription)")
                             try? await self.handleDownloadError(for: item.id, error: error)
-                        }
-                        
-                        // Cleanup our secured temporary file
-                        if let secureURL = securedTempURL, FileManager.default.fileExists(atPath: secureURL.path) {
-                            try? FileManager.default.removeItem(at: secureURL)
+                            
+                            // Cleanup temporary file
+                            if FileManager.default.fileExists(atPath: tempURL.path) {
+                                try? FileManager.default.removeItem(at: tempURL)
+                            }
                         }
                     }
                 }
             )
-        
-        // 3. Add to TaskCoordinator
-        await taskCoordinator.addTask(sessionTask, for: currentItem.id)
-        // taskCoordinator starts the task upon adding.
-    }
+
+            // 3. Add to TaskCoordinator
+            await taskCoordinator.addTask(sessionTask, for: currentItem.id)
+            // taskCoordinator starts the task upon adding.
+        }
     
     private func moveFileToPermanentLocation(_ sourceURL: URL, for item: Item) throws -> URL {
         let fileManager = FileManager.default
@@ -741,7 +706,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
     // Helper to update both local publishers and persistent storage for an item's state.
     private func updateItemStateAndStorage(_ itemId: UUID, state: DownloadState, progress: Double? = nil, localURL: URL? = nil, fileSize: Int64? = nil) async throws {
         // Fetch the most recent version of the item from storage
-        guard let itemToUpdate = try await storage.fetchItem(by: itemId) else {
+        guard var itemToUpdate = try await storage.fetchItem(by: itemId) else {
             print("DownloadManager: updateItemStateAndStorage - Item \(itemId) not found in storage. Cannot update.")
             // Update local state anyway so UI can reflect change attempt
             await MainActor.run {
