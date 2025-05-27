@@ -599,8 +599,13 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                         defer {
                             Task { await self.processQueue() }
                         }
-
+                        
                         if let error = error {
+                            // Clean up any temp file if it exists
+                            if let tempURL = tempLocalURL, FileManager.default.fileExists(atPath: tempURL.path) {
+                                try? FileManager.default.removeItem(at: tempURL)
+                            }
+                            
                             // Check if error is NSURLErrorCancelled and resume data might be available (for pause)
                             let nsError = error as NSError
                             if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
@@ -630,6 +635,13 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             return
                         }
                         
+                        // Verify the temp file actually exists before processing
+                        guard FileManager.default.fileExists(atPath: tempURL.path) else {
+                            print("DownloadManager: Downloaded file does not exist at temporary location: \(tempURL.path)")
+                            try? await self.handleDownloadError(for: item.id, error: DownloadError.fileOperationFailed("Downloaded file missing at temporary location", nil))
+                            return
+                        }
+                        
                         // 3. Process and move file (strategy or default)
                         do {
                             let finalURL: URL
@@ -638,7 +650,7 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             // Fetch file size from tempURL attributes before any processing
                             let attributes = try? FileManager.default.attributesOfItem(atPath: tempURL.path)
                             let fileSize = attributes?[.size] as? Int64
-
+                            
                             // Re-fetch strategy from self to ensure we have the latest
                             let currentStrategy = await self.downloadStrategies[downloadType.rawValue]
                             
@@ -654,6 +666,12 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             finalURL = try await self.moveFileToPermanentLocation(processedURL, for: item)
                             print("DownloadManager: File for item \(item.id) moved to \(finalURL.path)")
                             
+                            // Clean up temp file after successful move (only if it's different from final location)
+                            if processedURL != finalURL && FileManager.default.fileExists(atPath: processedURL.path) {
+                                try? FileManager.default.removeItem(at: processedURL)
+                                print("DownloadManager: Cleaned up temporary file at \(processedURL.path)")
+                            }
+                            
                             // 4. Update item state to .downloaded and save final state
                             try await self.updateItemStateAndStorage(item.id, state: .downloaded, progress: 1.0, localURL: finalURL, fileSize: fileSize)
                             print("DownloadManager: Item \(item.id) successfully downloaded and processed.")
@@ -665,35 +683,68 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
                             // Cleanup temporary file
                             if FileManager.default.fileExists(atPath: tempURL.path) {
                                 try? FileManager.default.removeItem(at: tempURL)
+                                print("DownloadManager: Cleaned up temporary file after error: \(tempURL.path)")
                             }
                         }
                     }
                 }
             )
-
-            // 3. Add to TaskCoordinator
-            await taskCoordinator.addTask(sessionTask, for: currentItem.id)
-            // taskCoordinator starts the task upon adding.
-        }
+        
+        // 3. Add to TaskCoordinator
+        await taskCoordinator.addTask(sessionTask, for: currentItem.id)
+        // taskCoordinator starts the task upon adding.
+    }
     
-    private func moveFileToPermanentLocation(_ sourceURL: URL, for item: Item) throws -> URL {
+    private func moveFileToPermanentLocation(_ sourceURL: URL, for item: Item) async throws -> URL {
         let fileManager = FileManager.default
+        
+        // Verify source file exists
+        guard fileManager.fileExists(atPath: sourceURL.path) else {
+            throw DownloadError.fileOperationFailed("Source file does not exist at path: \(sourceURL.path)", nil)
+        }
         
         let destinationDir = configuration.downloadsDirectory
             .appendingPathComponent(item.downloadType.rawValue, isDirectory: true)
             .appendingPathComponent(item.parentModelId?.uuidString ?? "orphaned_items", isDirectory: true)
         
-        try fileManager.safeCreateDirectory(at: destinationDir)
+        do {
+            try fileManager.safeCreateDirectory(at: destinationDir)
+        } catch {
+            throw DownloadError.fileOperationFailed("Failed to create destination directory: \(destinationDir.path)", error)
+        }
         
-        // Use a unique filename, e.g., item ID + original extension or strategy-defined extension
-        // Ensure item.downloadType.fileExtension is robust.
-        let fileExtension = item.downloadType.fileExtension.isEmpty ? sourceURL.pathExtension : item.downloadType.fileExtension
+        // Determine file extension more robustly
+        var fileExtension = ""
+        if !item.downloadType.fileExtension.isEmpty {
+            fileExtension = item.downloadType.fileExtension
+        } else if !sourceURL.pathExtension.isEmpty {
+            fileExtension = sourceURL.pathExtension
+        } else {
+            // Fallback: try to detect from downloaded file
+            if let detectedExtension = detectFileExtension(at: sourceURL) {
+                fileExtension = detectedExtension
+            } else {
+                fileExtension = "bin" // Generic binary extension as last resort
+            }
+        }
+        
+        // Remove leading dot if present
+        if fileExtension.hasPrefix(".") {
+            fileExtension = String(fileExtension.dropFirst())
+        }
+        
         let fileName = "\(item.id.uuidString).\(fileExtension)"
         let finalURL = destinationDir.appendingPathComponent(fileName)
         
-        try fileManager.secureMoveItem(at: sourceURL, to: finalURL)
-        return finalURL
+        do {
+            try fileManager.secureMoveItem(at: sourceURL, to: finalURL)
+            print("DownloadManager: Successfully moved file from \(sourceURL.path) to \(finalURL.path)")
+            return finalURL
+        } catch {
+            throw DownloadError.fileOperationFailed("Failed to move file from \(sourceURL.path) to \(finalURL.path)", error)
+        }
     }
+
 
     private func handleDownloadError(for itemId: UUID, error: Error) async throws {
         let currentProgress = await MainActor.run { self.downloadProgress[itemId] } ?? 0.0
@@ -775,4 +826,33 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
             _itemTypeMatches(item)
         }
     }
+}
+
+extension DownloadManager {
+    
+    // Add this helper method to detect file extension from file content
+    private func detectFileExtension(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+              data.count >= 4 else {
+            return nil
+        }
+        
+        let bytes = data.prefix(4)
+        
+        // Check for common file signatures
+        if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47]) { // PNG
+            return "png"
+        } else if bytes.starts(with: [0xFF, 0xD8, 0xFF]) { // JPEG
+            return "jpg"
+        } else if bytes.starts(with: [0x50, 0x4B, 0x03, 0x04]) || bytes.starts(with: [0x50, 0x4B, 0x05, 0x06]) { // ZIP
+            return "zip"
+        } else if bytes.starts(with: [0x25, 0x50, 0x44, 0x46]) { // PDF
+            return "pdf"
+        } else if String(data: data.prefix(100), encoding: .utf8) != nil { // Text-based content
+            return "txt"
+        }
+        
+        return nil
+    }
+
 }

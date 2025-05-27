@@ -5,6 +5,20 @@
 //  Created by Kashif Hussain on 26/05/25.
 //
 
+//
+//  NetworkClient.swift
+//  DownloadManager
+//
+//  Created by Kashif Hussain on 26/05/25.
+//
+
+//
+//  NetworkClient.swift
+//  DownloadManager
+//
+//  Created by Kashif Hussain on 26/05/25.
+//
+
 // MARK: - Network Client
 import Foundation
 
@@ -28,8 +42,46 @@ actor SessionDelegateHandler: NSObject, URLSessionDownloadDelegate {
 
     // MARK: - URLSessionDownloadDelegate
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // CRITICAL: Move file immediately to prevent URLSession from deleting it
+        let fileManager = FileManager.default
+        
+        // Create temp directory path inline to avoid actor isolation issues
+        let tempFilesDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("DownloadManager_SafeTemp", isDirectory: true)
+        
+        // Create a unique filename for our safe temp location
+        let safeFileName = "\(UUID().uuidString)_\(downloadTask.taskIdentifier).tmp"
+        let safeTempURL = tempFilesDirectory.appendingPathComponent(safeFileName)
+        
+        var finalLocation: URL?
+        var moveError: Error?
+        
+        do {
+            // Ensure our temp directory exists
+            try fileManager.createDirectory(at: tempFilesDirectory, withIntermediateDirectories: true, attributes: nil)
+            
+            // Move the file immediately to our safe location
+            if fileManager.fileExists(atPath: location.path) {
+                // If file already exists at destination, remove it first
+                if fileManager.fileExists(atPath: safeTempURL.path) {
+                    try fileManager.removeItem(at: safeTempURL)
+                }
+                try fileManager.moveItem(at: location, to: safeTempURL)
+                finalLocation = safeTempURL
+                print("NetworkClient: Moved download to safe temp location: \(safeTempURL.path)")
+            } else {
+                moveError = NSError(domain: "DownloadManager", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "Downloaded file does not exist at expected location: \(location.path)"
+                ])
+            }
+        } catch {
+            moveError = error
+            print("NetworkClient: Failed to move downloaded file to safe location: \(error.localizedDescription)")
+        }
+        
+        // Now call our completion handler asynchronously with the safe location
         Task {
-            await handleDownloadCompletion(task: downloadTask, location: location, error: nil)
+            await handleDownloadCompletion(task: downloadTask, location: finalLocation, error: moveError)
         }
     }
 
@@ -73,6 +125,25 @@ actor SessionDelegateHandler: NSObject, URLSessionDownloadDelegate {
         if totalBytesExpectedToWrite > 0 {
             let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
             progressHandlers[task]?(progress)
+        }
+    }
+    
+    // Cleanup method to remove temporary files
+    func cleanupTempFiles() {
+        let fileManager = FileManager.default
+        let tempFilesDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("DownloadManager_SafeTemp", isDirectory: true)
+        
+        do {
+            if fileManager.fileExists(atPath: tempFilesDirectory.path) {
+                let tempFiles = try fileManager.contentsOfDirectory(at: tempFilesDirectory, includingPropertiesForKeys: nil)
+                for file in tempFiles {
+                    try? fileManager.removeItem(at: file)
+                }
+                print("NetworkClient: Cleaned up \(tempFiles.count) temporary files")
+            }
+        } catch {
+            print("NetworkClient: Error cleaning up temp files: \(error.localizedDescription)")
         }
     }
 }
@@ -155,8 +226,10 @@ public actor NetworkClient {
         return sessionTask
     }
 
-
     public func invalidateAndCancel() {
+        Task {
+            await delegateHandler.cleanupTempFiles()
+        }
         urlSession.invalidateAndCancel()
     }
 }
