@@ -10,7 +10,7 @@
 import Foundation
 
 /// Represents an individual downloadable item (e.g., Module)
-public protocol DownloadableItem: AnyObject, Identifiable, Codable, Sendable {
+public protocol DownloadableItem: AnyObject, Identifiable, Sendable {
     associatedtype DownloadType: DownloadTypeProtocol
     
     var id: UUID { get }
