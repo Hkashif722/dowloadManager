@@ -11,27 +11,27 @@ public enum DownloadState: String, Codable, CaseIterable, Equatable, Sendable {
     case cancelling
     
     /// Whether the download is currently in progress
-    var isInProgress: Bool {
+    public var isInProgress: Bool {
         [.downloading, .queued].contains(self)
     }
     
     /// Whether the download can be started or resumed
-    var canStart: Bool {
+    public var canStart: Bool {
         [.notDownloaded, .failed].contains(self)
     }
     
     /// Whether the download can be paused
-    var canPause: Bool {
+    public var canPause: Bool {
         self == .downloading
     }
     
     /// Whether the download can be resumed
-    var canResume: Bool {
+    public var canResume: Bool {
         self == .paused
     }
     
     /// Whether the content is available for playback
-    var isPlayable: Bool {
+    public var isPlayable: Bool {
         self == .downloaded
     }
 }
