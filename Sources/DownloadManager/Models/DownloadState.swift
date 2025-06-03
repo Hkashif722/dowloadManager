@@ -1,7 +1,7 @@
 import Foundation
 
 /// Represents the various states of a download operation
-public enum DownloadState: CaseIterable {
+public enum DownloadState: CaseIterable, String, Codable, Equatable, Sendable {
     case notDownloaded
     case queued
     case downloading
