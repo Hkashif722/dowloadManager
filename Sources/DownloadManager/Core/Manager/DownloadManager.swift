@@ -482,12 +482,39 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
 
         updateLocalState(itemId: itemId, state: .notDownloaded, progress: 0.0)
         
-        // 5. Optionally remove item from its parent model if it's no longer relevant
+        // 5. Remove item from its parent model and delete parent model if no items remain
         if let parentId = item.parentModelId, var parentModel = try? await storage.fetchModel(by: parentId) {
+            // Remove the item from parent model
             parentModel.items.removeAll(where: { $0.id == itemId })
-            try? await storage.saveModel(parentModel)
-             print("DownloadManager: Item \(itemId) removed from parent model \(parentId).")
+            
+            // Check if parent model has any items left
+            if parentModel.items.isEmpty {
+                // No items left in the parent model, delete the entire model
+                do {
+                    try await storage.deleteModel(parentModel)
+                    print("DownloadManager: Parent model \(parentId) deleted as it has no items remaining after removing item \(itemId).")
+                    
+                    // Clean up any UI state related to the parent model's items
+                    await MainActor.run {
+                        // Remove all download states and progress for items that were in this model
+                        // (though there should only be the one we just processed)
+                        for modelItem in parentModel.items {
+                            self.downloadStates.removeValue(forKey: modelItem.id)
+                            self.downloadProgress.removeValue(forKey: modelItem.id)
+                        }
+                    }
+                } catch {
+                    print("DownloadManager: Failed to delete parent model \(parentId): \(error.localizedDescription)")
+                    // If we can't delete the parent model, at least save it without the removed item
+                    try? await storage.saveModel(parentModel)
+                }
+            } else {
+                // Parent model still has items, just save the updated model
+                try? await storage.saveModel(parentModel)
+                print("DownloadManager: Item \(itemId) removed from parent model \(parentId). Model still has \(parentModel.items.count) item(s) remaining.")
+            }
         }
+        
         activeDownloadsCount = await taskCoordinator.activeTaskCount // Recalculate just in case
     }
 
