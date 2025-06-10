@@ -7,7 +7,7 @@ public enum DownloadError: LocalizedError, Equatable, Sendable {
     case itemNotFound
     case modelNotFound
     case networkError(Error)
-    case storageError(Error)
+    case storageError(String)
     case missingConfiguration
     case missingStorage
     case fileOperationFailed(String, Error?)
@@ -30,7 +30,7 @@ public enum DownloadError: LocalizedError, Equatable, Sendable {
         case .networkError(let error):
             return "Network error: \(error.localizedDescription)"
         case .storageError(let error):
-            return "Storage error: \(error.localizedDescription)"
+            return "Storage error: \(error)"
         case .missingConfiguration:
             return "DownloadManager configuration is required."
         case .missingStorage:
@@ -65,7 +65,7 @@ public enum DownloadError: LocalizedError, Equatable, Sendable {
         case (.itemNotFound, .itemNotFound): return true
         case (.modelNotFound, .modelNotFound): return true
         case (.networkError(let l), .networkError(let r)): return l.localizedDescription == r.localizedDescription
-        case (.storageError(let l), .storageError(let r)): return l.localizedDescription == r.localizedDescription
+        case (.storageError(let l), .storageError(let r)): return l == r
         case (.missingConfiguration, .missingConfiguration): return true
         case (.missingStorage, .missingStorage): return true
         case (.fileOperationFailed(let lReason, _), .fileOperationFailed(let rReason, _)): return lReason == rReason
