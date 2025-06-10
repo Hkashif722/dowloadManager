@@ -162,7 +162,9 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
     }
     
     public func registerStrategy<S: DownloadStrategy>(_ strategy: S, for type: DownloadType) where S.Item == Item {
-        downloadStrategies[type.rawValue] = strategy
+        // Wrap the strategy in DownloadStrategyHelper when storing to preserve type information
+        let wrappedStrategy = DownloadStrategyHelper<Item>(strategy)
+        downloadStrategies[type.rawValue] = wrappedStrategy
     }
     
     /// Download an item. It will be added to a queue and processed.
