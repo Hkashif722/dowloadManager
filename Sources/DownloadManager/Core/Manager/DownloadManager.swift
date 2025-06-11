@@ -762,7 +762,13 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
             fileExtension = String(fileExtension.dropFirst())
         }
         
-        let fileName = "\(item.id.uuidString).\(fileExtension)"
+        // ✅ NEW: Handle empty extensions properly
+        let fileName: String
+        if fileExtension.isEmpty {
+            fileName = item.id.uuidString  // No dot, no extension for directories
+        } else {
+            fileName = "\(item.id.uuidString).\(fileExtension)"
+        }
         let finalURL = destinationDir.appendingPathComponent(fileName)
         
         do {
