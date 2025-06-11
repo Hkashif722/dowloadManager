@@ -752,8 +752,6 @@ public final class DownloadManager<Model: DownloadableModel, Storage: DownloadSt
             // Fallback: try to detect from downloaded file
             if let detectedExtension = detectFileExtension(at: sourceURL) {
                 fileExtension = detectedExtension
-            } else {
-                fileExtension = "bin" // Generic binary extension as last resort
             }
         }
         
